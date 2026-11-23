@@ -25,7 +25,7 @@ Self-Aware Bot Mode: Autonomous loop that plans multi-step activity arcs, avoids
 📦 Auto-Dependency Setup & Session Persistence: Automatically detects and installs missing packages (rich, playwright, pyautogui, mss, pillow), remembers your saved chat thread URL (last_chat_url), and keeps your config clean.
 
 🚀 Quick Start
-Run python BrowserClaw_fixed.py (missing Python packages will be prompted to install automatically).
+Run python BrowserClaw.py (missing Python packages will be prompted to install automatically).
 
 Choose your browser and intelligence mode (NORMAL or SELF_AWARE).
 
