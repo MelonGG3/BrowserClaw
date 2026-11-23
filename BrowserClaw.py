@@ -10,7 +10,6 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# MUST run BEFORE importing pyautogui / mss / tkinter so physical pixel coordinates match 1:1
 if os.name == "nt":
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -201,7 +200,7 @@ from rich.live import Live
 from rich import box
 from playwright.sync_api import sync_playwright
 
-pyautogui.FAILSAFE = False  # Handled explicitly via real-user cursor check so AI clicks near (0,0) never false-trigger
+pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.01
 
 console = Console()
@@ -213,19 +212,19 @@ CONFIG_VERSION = 25
 DEFAULT_CONFIG = {
     "config_version": CONFIG_VERSION,
     "browser": "msedge",
-    "agent_mode": "NORMAL",          # NORMAL | SELF_AWARE
-    "debug_mode": False,             # False = Clean CMD | True = Show Bridge, AI Reply, Steps & Results
-    "allow_tts": False,              # False = TTS completely removed | True = Allow speak_tts tool
-    "gemini_model": "AUTO",          # AUTO | HYDROGEN | KEEP
-    "connect_mode": "EDGE_GEMINI",   # EDGE_GEMINI | LIVE_ATTACH
-    "vision_mode": "ALWAYS",         # ALWAYS | SMART_CHECK | OFF
-    "safety_mode": "AUTO",           # AUTO | CONFIRM
-    "virtual_cursor": True,          # Independent visible AI cursor overlay (moves itself, never follows user)
-    "vision_grid": True,             # Draw 0..1000 coordinate grid on AI screenshots
-    "hide_browser": True,            # Keep Gemini browser off-screen & active
-    "hide_cmd_while_running": False, # Keep terminal visible
-    "always_new_chat": False,        # Resume existing chat across reopens & messages
-    "last_chat_url": "",             # Saved conversation URL (/app/<id>)
+    "agent_mode": "NORMAL",
+    "debug_mode": False,
+    "allow_tts": False,
+    "gemini_model": "AUTO",
+    "connect_mode": "EDGE_GEMINI",
+    "vision_mode": "ALWAYS",
+    "safety_mode": "AUTO",
+    "virtual_cursor": True,
+    "vision_grid": True,
+    "hide_browser": True,
+    "hide_cmd_while_running": False,
+    "always_new_chat": False,
+    "last_chat_url": "",
     "max_steps": 30,
     "screen_width": 1280,
     "screen_height": 720,
@@ -267,6 +266,269 @@ def get_physical_screen_size() -> tuple[int, int]:
             return int(sw), int(sh)
         except Exception:
             return 1920, 1080
+
+
+def detect_monitors() -> list[dict]:
+    """Detects all connected physical monitors on both Windows and Linux."""
+    monitors: list[dict] = []
+
+    if os.name == "nt":
+        try:
+            class _RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", ctypes.c_long),
+                    ("top", ctypes.c_long),
+                    ("right", ctypes.c_long),
+                    ("bottom", ctypes.c_long),
+                ]
+
+            class _MONITORINFOEXW(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", ctypes.wintypes.DWORD),
+                    ("rcMonitor", _RECT),
+                    ("rcWork", _RECT),
+                    ("dwFlags", ctypes.wintypes.DWORD),
+                    ("szDevice", ctypes.wintypes.WCHAR * 32),
+                ]
+
+            user32 = ctypes.windll.user32
+            raw_list: list[dict] = []
+
+            @ctypes.WINFUNCTYPE(
+                ctypes.c_bool,
+                ctypes.wintypes.HMONITOR,
+                ctypes.wintypes.HDC,
+                ctypes.POINTER(_RECT),
+                ctypes.wintypes.LPARAM,
+            )
+            def _enum_mon_cb(hmon, _hdc, _lprc, _data):
+                mi = _MONITORINFOEXW()
+                mi.cbSize = ctypes.sizeof(_MONITORINFOEXW)
+                if user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                    left = int(mi.rcMonitor.left)
+                    top = int(mi.rcMonitor.top)
+                    width = int(mi.rcMonitor.right - mi.rcMonitor.left)
+                    height = int(mi.rcMonitor.bottom - mi.rcMonitor.top)
+                    primary = bool(mi.dwFlags & 1)
+                    dev_name = str(mi.szDevice or f"DISPLAY{len(raw_list) + 1}")
+                    raw_list.append({
+                        "name": dev_name,
+                        "left": left,
+                        "top": top,
+                        "width": width,
+                        "height": height,
+                        "primary": primary,
+                    })
+                return True
+
+            user32.EnumDisplayMonitors(0, 0, _enum_mon_cb, 0)
+            if raw_list:
+                raw_list.sort(key=lambda m: (not m["primary"], m["left"], m["top"]))
+                for idx, m in enumerate(raw_list, start=1):
+                    monitors.append({"index": idx, **m})
+                return monitors
+        except Exception:
+            pass
+
+        try:
+            with mss.MSS() as sct:
+                for idx, mon in enumerate(sct.monitors[1:], start=1):
+                    monitors.append({
+                        "index": idx,
+                        "name": f"Monitor {idx}",
+                        "left": int(mon.get("left", 0)),
+                        "top": int(mon.get("top", 0)),
+                        "width": int(mon.get("width", 1920)),
+                        "height": int(mon.get("height", 1080)),
+                        "primary": idx == 1,
+                    })
+                if monitors:
+                    return monitors
+        except Exception:
+            pass
+
+        try:
+            count = int(ctypes.windll.user32.GetSystemMetrics(80))
+            sw, sh = get_physical_screen_size()
+            for idx in range(1, max(1, count) + 1):
+                monitors.append({
+                    "index": idx,
+                    "name": f"Monitor {idx}",
+                    "left": 0 if idx == 1 else sw * (idx - 1),
+                    "top": 0,
+                    "width": sw,
+                    "height": sh,
+                    "primary": idx == 1,
+                })
+            return monitors
+        except Exception:
+            pass
+
+    else:
+        try:
+            with mss.MSS() as sct:
+                if len(sct.monitors) >= 3:
+                    for idx, mon in enumerate(sct.monitors[1:], start=1):
+                        left = int(mon.get("left", 0))
+                        top = int(mon.get("top", 0))
+                        monitors.append({
+                            "index": idx,
+                            "name": f"Monitor {idx}",
+                            "left": left,
+                            "top": top,
+                            "width": int(mon.get("width", 1920)),
+                            "height": int(mon.get("height", 1080)),
+                            "primary": (left == 0 and top == 0) if idx > 1 else True,
+                        })
+                    return monitors
+        except Exception:
+            pass
+
+        if shutil.which("xrandr"):
+            try:
+                out = subprocess.check_output(["xrandr", "--listmonitors"], text=True, stderr=subprocess.DEVNULL)
+                parsed: list[dict] = []
+                for line in out.splitlines():
+                    m = re.match(r"^\s*\d+:\s+\+(\*?)(\S+)\s+(\d+)(?:/\d+)?x(\d+)(?:/\d+)?\+(\-?\d+)\+(\-?\d+)", line)
+                    if m:
+                        parsed.append({
+                            "name": m.group(2),
+                            "left": int(m.group(5)),
+                            "top": int(m.group(6)),
+                            "width": int(m.group(3)),
+                            "height": int(m.group(4)),
+                            "primary": m.group(1) == "*",
+                        })
+                if parsed:
+                    parsed.sort(key=lambda m: (not m["primary"], m["left"], m["top"]))
+                    for idx, m in enumerate(parsed, start=1):
+                        monitors.append({"index": idx, **m})
+                    return monitors
+            except Exception:
+                pass
+
+            try:
+                out = subprocess.check_output(["xrandr", "--query"], text=True, stderr=subprocess.DEVNULL)
+                parsed = []
+                for line in out.splitlines():
+                    m = re.match(r"^(\S+)\s+connected\s+(primary\s+)?(\d+)x(\d+)\+(\-?\d+)\+(\-?\d+)", line)
+                    if m:
+                        parsed.append({
+                            "name": m.group(1),
+                            "left": int(m.group(5)),
+                            "top": int(m.group(6)),
+                            "width": int(m.group(3)),
+                            "height": int(m.group(4)),
+                            "primary": bool(m.group(2)),
+                        })
+                if parsed:
+                    parsed.sort(key=lambda m: (not m["primary"], m["left"], m["top"]))
+                    for idx, m in enumerate(parsed, start=1):
+                        monitors.append({"index": idx, **m})
+                    return monitors
+            except Exception:
+                pass
+
+        if shutil.which("wlr-randr"):
+            try:
+                out = subprocess.check_output(["wlr-randr"], text=True, stderr=subprocess.DEVNULL)
+                cur_name = None
+                cur_enabled = False
+                cur_res = None
+                cur_pos = (0, 0)
+                parsed = []
+                for line in out.splitlines():
+                    if line and not line[0].isspace():
+                        if cur_name and cur_enabled and cur_res:
+                            parsed.append({
+                                "name": cur_name,
+                                "left": cur_pos[0],
+                                "top": cur_pos[1],
+                                "width": cur_res[0],
+                                "height": cur_res[1],
+                                "primary": len(parsed) == 0,
+                            })
+                        cur_name = line.split()[0]
+                        cur_enabled = False
+                        cur_res = None
+                        cur_pos = (0, 0)
+                    else:
+                        s = line.strip()
+                        if s.startswith("Enabled:"):
+                            cur_enabled = "yes" in s.lower()
+                        elif "px" in s and "current" in s:
+                            rm = re.search(r"(\d+)x(\d+)\s+px", s)
+                            if rm:
+                                cur_res = (int(rm.group(1)), int(rm.group(2)))
+                        elif s.startswith("Position:"):
+                            pm = re.search(r"(\-?\d+),(\-?\d+)", s)
+                            if pm:
+                                cur_pos = (int(pm.group(1)), int(pm.group(2)))
+                if cur_name and cur_enabled and cur_res:
+                    parsed.append({
+                        "name": cur_name,
+                        "left": cur_pos[0],
+                        "top": cur_pos[1],
+                        "width": cur_res[0],
+                        "height": cur_res[1],
+                        "primary": len(parsed) == 0,
+                    })
+                if parsed:
+                    for idx, m in enumerate(parsed, start=1):
+                        monitors.append({"index": idx, **m})
+                    return monitors
+            except Exception:
+                pass
+
+        drm_root = Path("/sys/class/drm")
+        if drm_root.exists():
+            try:
+                connected_cards = []
+                for status_file in sorted(drm_root.glob("card*-*/status")):
+                    try:
+                        if status_file.read_text(encoding="utf-8", errors="ignore").strip().lower() == "connected":
+                            connected_cards.append(status_file.parent.name)
+                    except Exception:
+                        continue
+                if len(connected_cards) >= 2:
+                    sw, sh = get_physical_screen_size()
+                    for idx, cname in enumerate(connected_cards, start=1):
+                        monitors.append({
+                            "index": idx,
+                            "name": cname,
+                            "left": 0 if idx == 1 else sw * (idx - 1),
+                            "top": 0,
+                            "width": sw,
+                            "height": sh,
+                            "primary": idx == 1,
+                        })
+                    return monitors
+            except Exception:
+                pass
+
+    sw, sh = get_physical_screen_size()
+    return [{
+        "index": 1,
+        "name": "Monitor 1",
+        "left": 0,
+        "top": 0,
+        "width": sw,
+        "height": sh,
+        "primary": True,
+    }]
+
+
+def has_two_monitors() -> bool:
+    return len(detect_monitors()) == 2
+
+
+def get_monitor_summary() -> tuple[int, str]:
+    mons = detect_monitors()
+    count = len(mons)
+    res_list = " + ".join(f"{m['width']}x{m['height']}" for m in mons)
+    if count == 2:
+        return count, f"2 ({res_list})"
+    return count, f"{count} ({res_list})"
 
 
 def build_tools_reference(cfg: dict, self_aware: bool = False) -> str:
@@ -454,10 +716,10 @@ def set_console_window_state(visible: bool):
                 return
             user32 = ctypes.windll.user32
             if visible:
-                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                user32.ShowWindow(hwnd, 9)
                 user32.SetForegroundWindow(hwnd)
             else:
-                user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+                user32.ShowWindow(hwnd, 6)
         except Exception:
             pass
         return
@@ -477,8 +739,6 @@ def set_console_window_state(visible: bool):
     except Exception:
         pass
 
-
-# --- Native Win32 / Cross-Platform Physical Input Engine ---
 
 if os.name == "nt":
     class _POINT(ctypes.Structure):
@@ -597,13 +857,13 @@ def physical_click(px: int, py: int, button: str = "left", restore_user_cursor: 
     try:
         if os.name == "nt":
             if button == "right":
-                _win32_mouse_event(0x0008)  # RIGHTDOWN
+                _win32_mouse_event(0x0008)
                 time.sleep(0.025)
-                _win32_mouse_event(0x0010)  # RIGHTUP
+                _win32_mouse_event(0x0010)
             elif button == "middle":
-                _win32_mouse_event(0x0020)  # MIDDLEDOWN
+                _win32_mouse_event(0x0020)
                 time.sleep(0.025)
-                _win32_mouse_event(0x0040)  # MIDDLEUP
+                _win32_mouse_event(0x0040)
             elif button == "double":
                 for i in range(2):
                     _win32_mouse_event(0x0002)
@@ -619,9 +879,9 @@ def physical_click(px: int, py: int, button: str = "left", restore_user_cursor: 
                     if i < 2:
                         time.sleep(0.045)
             else:
-                _win32_mouse_event(0x0002)  # LEFTDOWN
+                _win32_mouse_event(0x0002)
                 time.sleep(0.025)
-                _win32_mouse_event(0x0004)  # LEFTUP
+                _win32_mouse_event(0x0004)
         else:
             if button == "double":
                 pyautogui.doubleClick(px, py, interval=0.055)
@@ -649,7 +909,7 @@ def physical_scroll(px: int, py: int, clicks: int, horizontal: bool = False, res
     time.sleep(0.025)
     try:
         if os.name == "nt":
-            flag = 0x01000 if horizontal else 0x0800  # MOUSEEVENTF_HWHEEL : MOUSEEVENTF_WHEEL
+            flag = 0x01000 if horizontal else 0x0800
             _win32_mouse_event(flag, mouse_data=int(clicks) & 0xFFFFFFFF)
         else:
             if horizontal:
@@ -1001,7 +1261,6 @@ class VirtualCursorOverlay:
         if self._tick_count % 12 == 0:
             self._enforce_always_on_top()
 
-        # Render ONLY from the AI cursor's own independent coordinates (never reads user's mouse)
         with self.lock:
             x, y = self.cur_x, self.cur_y
             pulse = self.pulse_radius
@@ -1399,6 +1658,7 @@ def read_key() -> str:
 
 def show_startup_loading_screen():
     clear_screen()
+    _, mon_desc = get_monitor_summary()
     logo = Text()
     logo.append(" ██████╗ ██████╗  ██████╗ ██╗    ██╗███████╗███████╗██████╗  ██████╗██╗      █████╗ ██╗    ██╗\n", style="bold bright_cyan")
     logo.append(" ██╔══██╗██╔══██╗██╔═══██╗██║    ██║██╔════╝██╔════╝██╔══██╗██╔════╝██║     ██╔══██╗██║    ██║\n", style="bold bright_cyan")
@@ -1409,7 +1669,7 @@ def show_startup_loading_screen():
 
     stages = [
         (f"Initializing BrowserClaw Core Engine ({OS_NAME_LABEL})...", 20),
-        ("Calibrating 1:1 DPI-Aware Physical Clicks & Crosshair Feedback...", 45),
+        (f"Detecting Displays ({mon_desc} on {OS_NAME_LABEL}) & Calibrating DPI...", 45),
         ("Loading Independent Self-Moving AI Cursor & Keystroke Engine...", 70),
         ("Scanning Installed Games, Discord & Saved Chat Thread...", 90),
         ("Ready! Launching BrowserClaw...", 100),
@@ -1449,6 +1709,7 @@ def render_banner(cfg: dict):
     vision_label = cfg.get("vision_mode", "ALWAYS").upper()
     agent_mode = cfg.get("agent_mode", "NORMAL").upper()
     mode_badge = "[bold bright_yellow]SELF-AWARE BOT[/]" if agent_mode == "SELF_AWARE" else "[bold bright_green]NORMAL[/]"
+    _, mon_desc = get_monitor_summary()
 
     header = Text()
     header.append(" ██████╗ ██████╗  ██████╗ ██╗    ██╗███████╗███████╗██████╗  ██████╗██╗      █████╗ ██╗    ██╗\n", style="bold bright_cyan")
@@ -1460,6 +1721,7 @@ def render_banner(cfg: dict):
 
     status = (
         f"[bold bright_green]OS:[/] [white]{OS_NAME_LABEL}[/]   "
+        f"[bold cyan]MONITORS:[/] [white]{mon_desc}[/]   "
         f"[bold bright_green]BROWSER:[/] [white]{browser_label}[/]   "
         f"[bold bright_yellow]MODE:[/] {mode_badge}   "
         f"[bold bright_cyan]DEBUG:[/] [white]{debug_label}[/]   "
@@ -1811,11 +2073,11 @@ class GeminiBridge:
                 try:
                     h = ctypes.wintypes.HWND(hwnd)
                     if visible:
-                        user32.ShowWindow(h, 9)  # SW_RESTORE
+                        user32.ShowWindow(h, 9)
                         user32.SetWindowPos(h, ctypes.wintypes.HWND(0), 120, 80, 1200, 820, 0x0040)
                         user32.SetForegroundWindow(h)
                     else:
-                        user32.ShowWindow(h, 4)  # SW_SHOWNOACTIVATE
+                        user32.ShowWindow(h, 4)
                         user32.SetWindowPos(h, ctypes.wintypes.HWND(1), -32000, -32000, 1200, 820, 0x0010 | 0x0040)
                 except Exception:
                     pass
@@ -2572,9 +2834,14 @@ def _overlay_vision_grid(img: Image.Image) -> Image.Image:
     return overlay.convert("RGB")
 
 
-def capture_screen(cfg: dict, region: tuple[int, int, int, int] | None = None) -> bytes:
+def capture_screen(cfg: dict, region: tuple[int, int, int, int] | None = None, monitor_index: int = 1) -> bytes:
     with mss.MSS() as sct:
-        monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+        if monitor_index == 0:
+            monitor = sct.monitors[0]
+        elif 1 <= monitor_index < len(sct.monitors):
+            monitor = sct.monitors[monitor_index]
+        else:
+            monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
         raw = sct.grab(monitor)
         img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
 
@@ -3322,7 +3589,8 @@ def _execute_tool_inner(action: dict, cfg: dict) -> tuple[str, bytes | None]:
         return f"Installed apps & games found on this PC: {discover_installed_apps_and_games()}", None
 
     if tool == "take_screenshot":
-        img_bytes = capture_screen(cfg)
+        mon_idx = safe_int(action.get("monitor"), 1)
+        img_bytes = capture_screen(cfg, monitor_index=mon_idx)
         cx, cy = AI_CURSOR.get_normalized_pos()
         return (
             f"In-memory screenshot captured ({cfg['screen_width']}x{cfg['screen_height']}) with 0..1000 coordinate grid. "
@@ -3337,7 +3605,8 @@ def _execute_tool_inner(action: dict, cfg: dict) -> tuple[str, bytes | None]:
             safe_int(action.get("x2"), 500),
             safe_int(action.get("y2"), 500),
         )
-        img_bytes = capture_screen(cfg, region=r)
+        mon_idx = safe_int(action.get("monitor"), 1)
+        img_bytes = capture_screen(cfg, region=r, monitor_index=mon_idx)
         return f"Zoomed screenshot of region {r} captured in memory.", img_bytes
 
     if tool == "get_pixel_color":
@@ -3350,7 +3619,18 @@ def _execute_tool_inner(action: dict, cfg: dict) -> tuple[str, bytes | None]:
     if tool == "get_screen_info":
         sw, sh = get_physical_screen_size()
         cx, cy = AI_CURSOR.get_normalized_pos()
-        return f"OS: {OS_NAME_LABEL} | Physical Screen resolution: {sw}x{sh}. AI Cursor normalized position: ({cx}, {cy}).", None
+        mons = detect_monitors()
+        mon_count = len(mons)
+        mon_details = ", ".join(
+            f"Monitor {m['index']} ({m['name']}): {m['width']}x{m['height']} at ({m['left']}, {m['top']}){' [Primary]' if m['primary'] else ''}"
+            for m in mons
+        )
+        dual_label = "2 Monitors Detected" if mon_count == 2 else f"{mon_count} Monitor(s) Detected"
+        return (
+            f"OS: {OS_NAME_LABEL} | {dual_label} [{mon_details}] | "
+            f"Primary Physical Screen resolution: {sw}x{sh}. AI Cursor normalized position: ({cx}, {cy}).",
+            None,
+        )
 
     if tool == "ui_list_elements":
         wtitle = str(action.get("window_title", ""))
